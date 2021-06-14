@@ -105,7 +105,7 @@ void Thread::deferCurrent() {
 	auto this_thread = getCurrentThread();
 	StatelessIrqLock irq_lock;
 	auto lock = frg::guard(&this_thread->_mutex);
-	
+
 	if(logRunStates)
 		infoLogger() << "thor: " << (void *)this_thread.get()
 				<< " is deferred" << frg::endlog;
@@ -127,20 +127,20 @@ void Thread::deferCurrent(IrqImageAccessor image) {
 	auto this_thread = getCurrentThread();
 	StatelessIrqLock irq_lock;
 	auto lock = frg::guard(&this_thread->_mutex);
-	
+
 	if(logRunStates)
 		infoLogger() << "thor: " << (void *)this_thread.get()
 				<< " is deferred" << frg::endlog;
 
 	assert(this_thread->_runState == kRunActive);
 	this_thread->_runState = kRunDeferred;
-	saveExecutor(&this_thread->_executor, image);
+	image.saveTo(this_thread->_executor);
 	getCpuData()->scheduler.update();
 	getCpuData()->scheduler.reschedule();
 	this_thread->_uninvoke();
 
 	runDetached([] (Continuation cont, IrqImageAccessor image, frg::unique_lock<Mutex> lock) {
-		scrubStack(image, cont);
+		image.scrubStack(cont);
 		lock.unlock();
 		localScheduler()->commit();
 		localScheduler()->invoke();
@@ -151,20 +151,20 @@ void Thread::suspendCurrent(IrqImageAccessor image) {
 	auto this_thread = getCurrentThread();
 	StatelessIrqLock irq_lock;
 	auto lock = frg::guard(&this_thread->_mutex);
-	
+
 	if(logRunStates)
 		infoLogger() << "thor: " << (void *)this_thread.get()
 				<< " is suspended" << frg::endlog;
 
 	assert(this_thread->_runState == kRunActive);
 	this_thread->_runState = kRunSuspended;
-	saveExecutor(&this_thread->_executor, image);
+	image.saveTo(this_thread->_executor);
 	getCpuData()->scheduler.update();
 	getCpuData()->scheduler.reschedule();
 	this_thread->_uninvoke();
 
 	runDetached([] (Continuation cont, IrqImageAccessor image, frg::unique_lock<Mutex> lock) {
-		scrubStack(image, cont);
+		image.scrubStack(cont);
 		lock.unlock();
 		localScheduler()->commit();
 		localScheduler()->invoke();
@@ -184,7 +184,7 @@ void Thread::interruptCurrent(Interrupt interrupt, FaultImageAccessor image) {
 	this_thread->_runState = kRunInterrupted;
 	this_thread->_lastInterrupt = interrupt;
 	++this_thread->_stateSeq;
-	saveExecutor(&this_thread->_executor, image);
+	image.saveTo(this_thread->_executor);
 	getCpuData()->scheduler.update();
 	Scheduler::suspendCurrent();
 	getCpuData()->scheduler.reschedule();
@@ -196,7 +196,7 @@ void Thread::interruptCurrent(Interrupt interrupt, FaultImageAccessor image) {
 		queue.splice(queue.end(), thread->_observeQueue);
 		auto sequence = thread->_stateSeq;
 
-		scrubStack(image, cont);
+		image.scrubStack(cont);
 		lock.unlock();
 
 		while(!queue.empty()) {
@@ -214,7 +214,7 @@ void Thread::interruptCurrent(Interrupt interrupt, SyscallImageAccessor image) {
 	auto this_thread = getCurrentThread();
 	StatelessIrqLock irq_lock;
 	auto lock = frg::guard(&this_thread->_mutex);
-	
+
 	if(logRunStates)
 		infoLogger() << "thor: " << (void *)this_thread.get()
 				<< " is (synchronously) interrupted" << frg::endlog;
@@ -223,7 +223,7 @@ void Thread::interruptCurrent(Interrupt interrupt, SyscallImageAccessor image) {
 	this_thread->_runState = kRunInterrupted;
 	this_thread->_lastInterrupt = interrupt;
 	++this_thread->_stateSeq;
-	saveExecutor(&this_thread->_executor, image);
+	image.saveTo(this_thread->_executor);
 	getCpuData()->scheduler.update();
 	Scheduler::suspendCurrent();
 	getCpuData()->scheduler.reschedule();
@@ -235,7 +235,7 @@ void Thread::interruptCurrent(Interrupt interrupt, SyscallImageAccessor image) {
 		queue.splice(queue.end(), thread->_observeQueue);
 		auto sequence = thread->_stateSeq;
 
-		scrubStack(image, cont);
+		image.scrubStack(cont);
 		lock.unlock();
 
 		while(!queue.empty()) {
@@ -258,7 +258,7 @@ void Thread::raiseSignals(SyscallImageAccessor image) {
 		infoLogger() << "thor: raiseSignals() in " << (void *)this_thread.get()
 				<< frg::endlog;
 	assert(this_thread->_runState == kRunActive);
-	
+
 	if(this_thread->_pendingKill) {
 		if(logRunStates)
 			infoLogger() << "thor: " << (void *)this_thread.get()
@@ -266,7 +266,7 @@ void Thread::raiseSignals(SyscallImageAccessor image) {
 
 		this_thread->_runState = kRunTerminated;
 		++this_thread->_stateSeq;
-		saveExecutor(&this_thread->_executor, image); // FIXME: Why do we save the state here?
+		image.saveTo(this_thread->_executor); // FIXME: Why do we save the state here?
 		getCpuData()->scheduler.update();
 		Scheduler::suspendCurrent();
 		Scheduler::unassociate(this_thread.get());
@@ -278,7 +278,7 @@ void Thread::raiseSignals(SyscallImageAccessor image) {
 			ObserveQueue queue;
 			queue.splice(queue.end(), thread->_observeQueue);
 
-			scrubStack(image, cont);
+			image.scrubStack(cont);
 			lock.unlock();
 
 			while(!queue.empty()) {
@@ -291,7 +291,7 @@ void Thread::raiseSignals(SyscallImageAccessor image) {
 			localScheduler()->invoke();
 		}, image, this_thread.get(), std::move(lock));
 	}
-	
+
 	if(this_thread->_pendingSignal == kSigInterrupt) {
 		if(logRunStates)
 			infoLogger() << "thor: " << (void *)this_thread.get()
@@ -301,7 +301,7 @@ void Thread::raiseSignals(SyscallImageAccessor image) {
 		this_thread->_lastInterrupt = kIntrRequested;
 		++this_thread->_stateSeq;
 		this_thread->_pendingSignal = kSigNone;
-		saveExecutor(&this_thread->_executor, image);
+		image.saveTo(this_thread->_executor);
 		getCpuData()->scheduler.update();
 		Scheduler::suspendCurrent();
 		getCpuData()->scheduler.reschedule();
@@ -313,7 +313,7 @@ void Thread::raiseSignals(SyscallImageAccessor image) {
 			queue.splice(queue.end(), thread->_observeQueue);
 			auto sequence = thread->_stateSeq;
 
-			scrubStack(image, cont);
+			image.scrubStack(cont);
 			lock.unlock();
 
 			while(!queue.empty()) {
@@ -341,7 +341,7 @@ void Thread::unblockOther(smarter::borrowed_ptr<Thread> thread) {
 
 	if(thread->_runState != kRunBlocked)
 		return;
-	
+
 	if(logRunStates)
 		infoLogger() << "thor: " << (void *)thread.get()
 				<< " is deferred (via unblock)" << frg::endlog;
@@ -372,7 +372,7 @@ Error Thread::resumeOther(smarter::borrowed_ptr<Thread> thread) {
 		return Error::threadExited;
 	if(thread->_runState != kRunInterrupted)
 		return Error::illegalState;
-	
+
 	if(logRunStates)
 		infoLogger() << "thor: " << (void *)thread.get()
 				<< " is suspended (via resume)" << frg::endlog;
@@ -458,7 +458,7 @@ smarter::borrowed_ptr<AddressSpace, BindableHandle> Thread::getAddressSpace() {
 void Thread::invoke() {
 	assert(!intsAreEnabled());
 	auto lock = frg::guard(&_mutex);
-	
+
 	if(logRunStates)
 		infoLogger() << "thor: "
 				<< " " << _credentials[0] << " " << _credentials[1]

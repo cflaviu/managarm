@@ -70,43 +70,19 @@ Executor::~Executor() {
 	kernelAlloc->free(_pointer);
 }
 
-void saveExecutor(Executor *executor, FaultImageAccessor accessor) {
+void BaseImageAccessor::saveTo(Executor *executor) {
+	auto dest = executor->general();
+	auto src = _frame();
 	for (int i = 0; i < 31; i++)
-		executor->general()->x[i] = accessor._frame()->x[i];
+		dest->x[i] = src->x[i];
 
-	executor->general()->elr = accessor._frame()->elr;
-	executor->general()->spsr = accessor._frame()->spsr;
-	executor->general()->domain = accessor._frame()->domain;
-	executor->general()->sp = accessor._frame()->sp;
-	executor->general()->tpidr_el0 = accessor._frame()->tpidr_el0;
+	dest->elr = src->elr;
+	dest->spsr = src->spsr;
+	dest->domain = src->domain;
+	dest->sp = src->sp;
+	dest->tpidr_el0 = src->tpidr_el0;
 
-	saveFpSimdRegisters(&executor->general()->fp);
-}
-
-void saveExecutor(Executor *executor, IrqImageAccessor accessor) {
-	for (int i = 0; i < 31; i++)
-		executor->general()->x[i] = accessor._frame()->x[i];
-
-	executor->general()->elr = accessor._frame()->elr;
-	executor->general()->spsr = accessor._frame()->spsr;
-	executor->general()->domain = accessor._frame()->domain;
-	executor->general()->sp = accessor._frame()->sp;
-	executor->general()->tpidr_el0 = accessor._frame()->tpidr_el0;
-
-	saveFpSimdRegisters(&executor->general()->fp);
-}
-
-void saveExecutor(Executor *executor, SyscallImageAccessor accessor) {
-	for (int i = 0; i < 31; i++)
-		executor->general()->x[i] = accessor._frame()->x[i];
-
-	executor->general()->elr = accessor._frame()->elr;
-	executor->general()->spsr = accessor._frame()->spsr;
-	executor->general()->domain = accessor._frame()->domain;
-	executor->general()->sp = accessor._frame()->sp;
-	executor->general()->tpidr_el0 = accessor._frame()->tpidr_el0;
-
-	saveFpSimdRegisters(&executor->general()->fp);
+	saveFpSimdRegisters(&dest->fp);
 }
 
 extern "C" void workStub();
@@ -131,18 +107,6 @@ void workOnExecutor(Executor *executor) {
 	executor->general()->elr = reinterpret_cast<uintptr_t>(stub);
 	executor->general()->sp = reinterpret_cast<uintptr_t>(sp);
 	executor->general()->spsr = 0x3c5;
-}
-
-void scrubStack(FaultImageAccessor accessor, Continuation cont) {
-	scrubStackFrom(reinterpret_cast<uintptr_t>(accessor.frameBase()), cont);;
-}
-
-void scrubStack(IrqImageAccessor accessor, Continuation cont) {
-	scrubStackFrom(reinterpret_cast<uintptr_t>(accessor.frameBase()), cont);;
-}
-
-void scrubStack(SyscallImageAccessor accessor, Continuation cont) {
-	scrubStackFrom(reinterpret_cast<uintptr_t>(accessor.frameBase()), cont);;
 }
 
 void scrubStack(Executor *executor, Continuation cont) {

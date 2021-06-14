@@ -2,7 +2,6 @@
 #include <thor-internal/arch/vmx.hpp>
 #include <thor-internal/debug.hpp>
 #include <thor-internal/fiber.hpp>
-#include <thor-internal/kasan.hpp>
 #include <thor-internal/main.hpp>
 #include <thor-internal/physical.hpp>
 
@@ -109,106 +108,6 @@ Executor::~Executor() {
 	kernelAlloc->free(_pointer);
 }
 
-void saveExecutor(Executor *executor, FaultImageAccessor accessor) {
-	executor->general()->rax = accessor._frame()->rax;
-	executor->general()->rbx = accessor._frame()->rbx;
-	executor->general()->rcx = accessor._frame()->rcx;
-	executor->general()->rdx = accessor._frame()->rdx;
-	executor->general()->rdi = accessor._frame()->rdi;
-	executor->general()->rsi = accessor._frame()->rsi;
-	executor->general()->rbp = accessor._frame()->rbp;
-
-	executor->general()->r8 = accessor._frame()->r8;
-	executor->general()->r9 = accessor._frame()->r9;
-	executor->general()->r10 = accessor._frame()->r10;
-	executor->general()->r11 = accessor._frame()->r11;
-	executor->general()->r12 = accessor._frame()->r12;
-	executor->general()->r13 = accessor._frame()->r13;
-	executor->general()->r14 = accessor._frame()->r14;
-	executor->general()->r15 = accessor._frame()->r15;
-
-	executor->general()->rip = accessor._frame()->rip;
-	executor->general()->cs = accessor._frame()->cs;
-	executor->general()->rflags = accessor._frame()->rflags;
-	executor->general()->rsp = accessor._frame()->rsp;
-	executor->general()->ss = accessor._frame()->ss;
-	executor->general()->clientFs = common::x86::rdmsr(common::x86::kMsrIndexFsBase);
-	executor->general()->clientGs = common::x86::rdmsr(common::x86::kMsrIndexKernelGsBase);
-
-	if(getGlobalCpuFeatures()->haveXsave){
-		common::x86::xsave((uint8_t*)executor->_fxState(), ~0);
-	} else {
-		asm volatile ("fxsaveq %0" : : "m" (*executor->_fxState()));
-	}
-}
-
-void saveExecutor(Executor *executor, IrqImageAccessor accessor) {
-	executor->general()->rax = accessor._frame()->rax;
-	executor->general()->rbx = accessor._frame()->rbx;
-	executor->general()->rcx = accessor._frame()->rcx;
-	executor->general()->rdx = accessor._frame()->rdx;
-	executor->general()->rdi = accessor._frame()->rdi;
-	executor->general()->rsi = accessor._frame()->rsi;
-	executor->general()->rbp = accessor._frame()->rbp;
-
-	executor->general()->r8 = accessor._frame()->r8;
-	executor->general()->r9 = accessor._frame()->r9;
-	executor->general()->r10 = accessor._frame()->r10;
-	executor->general()->r11 = accessor._frame()->r11;
-	executor->general()->r12 = accessor._frame()->r12;
-	executor->general()->r13 = accessor._frame()->r13;
-	executor->general()->r14 = accessor._frame()->r14;
-	executor->general()->r15 = accessor._frame()->r15;
-
-	executor->general()->rip = accessor._frame()->rip;
-	executor->general()->cs = accessor._frame()->cs;
-	executor->general()->rflags = accessor._frame()->rflags;
-	executor->general()->rsp = accessor._frame()->rsp;
-	executor->general()->ss = accessor._frame()->ss;
-	executor->general()->clientFs = common::x86::rdmsr(common::x86::kMsrIndexFsBase);
-	executor->general()->clientGs = common::x86::rdmsr(common::x86::kMsrIndexKernelGsBase);
-
-
-	if(getGlobalCpuFeatures()->haveXsave){
-		common::x86::xsave((uint8_t*)executor->_fxState(), ~0);
-	}else{
-		asm volatile ("fxsaveq %0" : : "m" (*executor->_fxState()));
-	}
-}
-
-void saveExecutor(Executor *executor, SyscallImageAccessor accessor) {
-	// Note that rbx, rcx and r11 are used internally by the syscall mechanism.
-	executor->general()->rax = accessor._frame()->rax;
-	executor->general()->rdx = accessor._frame()->rdx;
-	executor->general()->rdi = accessor._frame()->rdi;
-	executor->general()->rsi = accessor._frame()->rsi;
-	executor->general()->rbp = accessor._frame()->rbp;
-
-	executor->general()->r8 = accessor._frame()->r8;
-	executor->general()->r9 = accessor._frame()->r9;
-	executor->general()->r10 = accessor._frame()->r10;
-	executor->general()->r12 = accessor._frame()->r12;
-	executor->general()->r13 = accessor._frame()->r13;
-	executor->general()->r14 = accessor._frame()->r14;
-	executor->general()->r15 = accessor._frame()->r15;
-
-	// Note that we do not save cs and ss on syscall.
-	// We just assume that these registers have their usual values.
-	executor->general()->rip = accessor._frame()->rip;
-	executor->general()->cs = kSelClientUserCode;
-	executor->general()->rflags = accessor._frame()->rflags;
-	executor->general()->rsp = accessor._frame()->rsp;
-	executor->general()->ss = kSelClientUserData;
-	executor->general()->clientFs = common::x86::rdmsr(common::x86::kMsrIndexFsBase);
-	executor->general()->clientGs = common::x86::rdmsr(common::x86::kMsrIndexKernelGsBase);
-
-	if(getGlobalCpuFeatures()->haveXsave){
-		common::x86::xsave((uint8_t*)executor->_fxState(), ~0);
-	}else{
-		asm volatile ("fxsaveq %0" : : "m" (*executor->_fxState()));
-	}
-}
-
 void switchExecutor(smarter::borrowed_ptr<Thread> thread) {
 	assert(!intsAreEnabled());
 	getCpuData()->activeExecutor = thread;
@@ -269,22 +168,6 @@ extern "C" [[ noreturn ]] void _restoreExecutorRegisters(void *pointer);
 	_restoreExecutorRegisters(executor->general());
 }
 
-// --------------------------------------------------------
-// Stack scrubbing.
-// --------------------------------------------------------
-
-void scrubStack(FaultImageAccessor accessor, Continuation cont) {
-	scrubStackFrom(reinterpret_cast<uintptr_t>(accessor.frameBase()), cont);;
-}
-
-void scrubStack(IrqImageAccessor accessor, Continuation cont) {
-	scrubStackFrom(reinterpret_cast<uintptr_t>(accessor.frameBase()), cont);;
-}
-
-void scrubStack(SyscallImageAccessor accessor, Continuation cont) {
-	scrubStackFrom(reinterpret_cast<uintptr_t>(accessor.frameBase()), cont);;
-}
-
 void scrubStack(Executor *executor, Continuation cont) {
 	scrubStackFrom(reinterpret_cast<uintptr_t>(*executor->sp()), cont);
 }
@@ -334,28 +217,30 @@ PlatformCpuData::PlatformCpuData() {
 	for(int i = 0; i < maxPcidCount; i++)
 		pcidBindings[i].setupPcid(i);
 
+	using namespace common::x86;
+
 	// Setup the GDT.
 	// Note: the TSS requires two slots in the GDT.
-	common::x86::makeGdtNullSegment(gdt, kGdtIndexNull);
-	common::x86::makeGdtCode64SystemSegment(gdt, kGdtIndexInitialCode);
+	makeGdtNullSegment(gdt, kGdtIndexNull);
+	makeGdtCode64SystemSegment(gdt, kGdtIndexInitialCode);
 
-	common::x86::makeGdtTss64Descriptor(gdt, kGdtIndexTask, nullptr, 0);
-	common::x86::makeGdtCode64SystemSegment(gdt, kGdtIndexSystemIrqCode);
+	makeGdtTss64Descriptor(gdt, kGdtIndexTask, nullptr, 0);
+	makeGdtCode64SystemSegment(gdt, kGdtIndexSystemIrqCode);
 
-	common::x86::makeGdtCode64SystemSegment(gdt, kGdtIndexExecutorFaultCode);
-	common::x86::makeGdtCode64SystemSegment(gdt, kGdtIndexExecutorSyscallCode);
-	common::x86::makeGdtFlatData32SystemSegment(gdt, kGdtIndexExecutorKernelData);
-	common::x86::makeGdtNullSegment(gdt, kGdtIndexClientUserCompat);
-	common::x86::makeGdtFlatData32UserSegment(gdt, kGdtIndexClientUserData);
-	common::x86::makeGdtCode64UserSegment(gdt, kGdtIndexClientUserCode);
-	common::x86::makeGdtCode64SystemSegment(gdt, kGdtIndexSystemIdleCode);
-	common::x86::makeGdtCode64SystemSegment(gdt, kGdtIndexSystemFiberCode);
+	makeGdtCode64SystemSegment(gdt, kGdtIndexExecutorFaultCode);
+	makeGdtCode64SystemSegment(gdt, kGdtIndexExecutorSyscallCode);
+	makeGdtFlatData32SystemSegment(gdt, kGdtIndexExecutorKernelData);
+	makeGdtNullSegment(gdt, kGdtIndexClientUserCompat);
+	makeGdtFlatData32UserSegment(gdt, kGdtIndexClientUserData);
+	makeGdtCode64UserSegment(gdt, kGdtIndexClientUserCode);
+	makeGdtCode64SystemSegment(gdt, kGdtIndexSystemIdleCode);
+	makeGdtCode64SystemSegment(gdt, kGdtIndexSystemFiberCode);
 
-	common::x86::makeGdtCode64SystemSegment(gdt, kGdtIndexSystemNmiCode);
+	makeGdtCode64SystemSegment(gdt, kGdtIndexSystemNmiCode);
 
 	// Setup the per-CPU TSS. This TSS is used by system code.
-	memset(&tss, 0, sizeof(common::x86::Tss64));
-	common::x86::initializeTss64(&tss);
+	memset(&tss, 0, sizeof(Tss64));
+	initializeTss64(&tss);
 }
 
 void enableUserAccess() {

@@ -9,6 +9,7 @@
 #include <x86/idt.hpp>
 #include <x86/machine.hpp>
 #include <x86/tss.hpp>
+#include <thor-internal/kasan.hpp>
 #include <thor-internal/arch/ints.hpp>
 #include <thor-internal/arch/paging.hpp>
 #include <thor-internal/arch/pic.hpp>
@@ -46,7 +47,7 @@ enum {
 	kGdtIndexSystemNmiCode = 13
 };
 
-constexpr uint16_t selectorFor(uint16_t segment, uint16_t rpl) {
+constexpr uint16_t selectorFor(uint16_t segment, uint16_t rpl) noexcept {
 	return (segment << 3) | rpl;
 }
 
@@ -69,298 +70,9 @@ enum {
 };
 
 struct Executor;
-
-struct Continuation {
-	void *sp;
-};
-
-struct FaultImageAccessor {
-	friend void saveExecutor(Executor *executor, FaultImageAccessor accessor);
-
-	Word *ip() { return &_frame()->rip; }
-	Word *sp() { return &_frame()->rsp; }
-	Word *cs() { return &_frame()->cs; }
-	Word *ss() { return &_frame()->ss; }
-	Word *rflags() { return &_frame()->rflags; }
-	Word *code() { return &_frame()->code; }
-
-	bool inKernelDomain() {
-		if(*cs() == kSelSystemIrqCode
-				|| *cs() == kSelSystemIdleCode
-				|| *cs() == kSelSystemFiberCode
-				|| *cs() == kSelExecutorFaultCode
-				|| *cs() == kSelExecutorSyscallCode) {
-			return true;
-		}else{
-			assert(*cs() == kSelClientUserCompat
-					|| *cs() == kSelClientUserCode);
-			return false;
-		}
-	}
-
-	bool allowUserPages();
-
-	void *frameBase() { return _pointer + sizeof(Frame); }
-
-private:
-	// note: this struct is accessed from assembly.
-	// do not change the field offsets!
-	struct Frame {
-		Word rax;
-		Word rbx;
-		Word rcx;
-		Word rdx;
-		Word rdi;
-		Word rsi;
-		Word r8;
-		Word r9;
-		Word r10;
-		Word r11;
-		Word r12;
-		Word r13;
-		Word r14;
-		Word r15;
-		Word rbp;
-		Word code;
-
-		// the following fields are pushed by interrupt
-		Word rip;
-		Word cs;
-		Word rflags;
-		Word rsp;
-		Word ss;
-	};
-
-	Frame *_frame() {
-		return reinterpret_cast<Frame *>(_pointer);
-	}
-
-	char *_pointer;
-};
-
-struct IrqImageAccessor {
-	friend void saveExecutor(Executor *executor, IrqImageAccessor accessor);
-
-	Word *ip() { return &_frame()->rip; }
-
-	// TODO: These are only exposed for debugging.
-	Word *cs() { return &_frame()->cs; }
-	Word *rflags() { return &_frame()->rflags; }
-	Word *ss() { return &_frame()->ss; }
-
-	bool inPreemptibleDomain() {
-		assert(*cs() == kSelSystemIdleCode
-				|| *cs() == kSelSystemFiberCode
-				|| *cs() == kSelExecutorFaultCode
-				|| *cs() == kSelExecutorSyscallCode
-				|| *cs() == kSelClientUserCompat
-				|| *cs() == kSelClientUserCode);
-		return true;
-	}
-
-	bool inThreadDomain() {
-		assert(inPreemptibleDomain());
-		if(*cs() == kSelExecutorFaultCode
-				|| *cs() == kSelExecutorSyscallCode
-				|| *cs() == kSelClientUserCompat
-				|| *cs() == kSelClientUserCode) {
-			return true;
-		}else{
-			return false;
-		}
-	}
-
-	bool inManipulableDomain() {
-		assert(inThreadDomain());
-		if(*cs() == kSelClientUserCompat
-				|| *cs() == kSelClientUserCode) {
-			return true;
-		}else{
-			return false;
-		}
-	}
-
-	bool inFiberDomain() {
-		assert(inPreemptibleDomain());
-		return *cs() == kSelSystemFiberCode;
-	}
-
-	bool inIdleDomain() {
-		assert(inPreemptibleDomain());
-		return *cs() == kSelSystemIdleCode;
-	}
-
-	void *frameBase() { return _pointer + sizeof(Frame); }
-
-private:
-	// note: this struct is accessed from assembly.
-	// do not change the field offsets!
-	struct Frame {
-		Word rax;
-		Word rbx;
-		Word rcx;
-		Word rdx;
-		Word rdi;
-		Word rsi;
-		Word r8;
-		Word r9;
-		Word r10;
-		Word r11;
-		Word r12;
-		Word r13;
-		Word r14;
-		Word r15;
-		Word rbp;
-
-		// the following fields are pushed by interrupt
-		Word rip;
-		Word cs;
-		Word rflags;
-		Word rsp;
-		Word ss;
-	};
-
-	Frame *_frame() {
-		return reinterpret_cast<Frame *>(_pointer);
-	}
-
-	char *_pointer;
-};
-
-struct SyscallImageAccessor {
-	friend void saveExecutor(Executor *executor, SyscallImageAccessor accessor);
-
-	Word *number() { return &_frame()->rdi; }
-	Word *in0() { return &_frame()->rsi; }
-	Word *in1() { return &_frame()->rdx; }
-	Word *in2() { return &_frame()->rax; }
-	Word *in3() { return &_frame()->r8; }
-	Word *in4() { return &_frame()->r9; }
-	Word *in5() { return &_frame()->r10; }
-	Word *in6() { return &_frame()->r12; }
-	Word *in7() { return &_frame()->r13; }
-	Word *in8() { return &_frame()->r14; }
-
-	Word *error() { return &_frame()->rdi; }
-	Word *out0() { return &_frame()->rsi; }
-	Word *out1() { return &_frame()->rdx; }
-
-	void *frameBase() { return _pointer + sizeof(Frame); }
-
-private:
-	// this struct is accessed from assembly.
-	// do not randomly change its contents.
-	struct Frame {
-		Word rdi;
-		Word rsi;
-		Word rdx;
-		Word rax;
-		Word r8;
-		Word r9;
-		Word r10;
-		Word r12;
-		Word r13;
-		Word r14;
-		Word r15;
-		Word rbp;
-		Word rsp;
-		Word rip;
-		Word rflags;
-	};
-
-	Frame *_frame() {
-		return reinterpret_cast<Frame *>(_pointer);
-	}
-
-	char *_pointer;
-};
-
-struct NmiImageAccessor {
-	void **expectedGs() {
-		return &_frame()->expectedGs;
-	}
-
-	Word *ip() { return &_frame()->rip; }
-	Word *cs() { return &_frame()->cs; }
-	Word *rflags() { return &_frame()->rflags; }
-
-private:
-	// note: this struct is accessed from assembly.
-	// do not change the field offsets!
-	struct Frame {
-		Word rax;
-		Word rbx;
-		Word rcx;
-		Word rdx;
-		Word rdi;
-		Word rsi;
-		Word r8;
-		Word r9;
-		Word r10;
-		Word r11;
-		Word r12;
-		Word r13;
-		Word r14;
-		Word r15;
-		Word rbp;
-
-		// the following fields are pushed by interrupt
-		Word rip;
-		Word cs;
-		Word rflags;
-		Word rsp;
-		Word ss;
-
-		void *expectedGs;
-	};
-
-	Frame *_frame() {
-		return reinterpret_cast<Frame *>(_pointer);
-	}
-
-	char *_pointer;
-};
-
-// CpuData is some high-level struct that inherits from PlatformCpuData.
-struct CpuData;
-
-struct AbiParameters {
-	uintptr_t ip;
-	uintptr_t sp;
-	uintptr_t argument;
-};
-
-struct UserContext {
-	static void deactivate();
-
-	UserContext();
-
-	UserContext(const UserContext &other) = delete;
-
-	UserContext &operator= (const UserContext &other) = delete;
-
-	void enableIoPort(uintptr_t port);
-
-	// Migrates this UserContext to a different CPU.
-	void migrate(CpuData *cpu_data);
-
-	// TODO: This should be private.
-	UniqueKernelStack kernelStack;
-	common::x86::Tss64 tss;
-};
-
-struct FiberContext {
-	FiberContext(UniqueKernelStack stack);
-
-	FiberContext(const FiberContext &other) = delete;
-
-	FiberContext &operator= (const FiberContext &other) = delete;
-
-	// TODO: This should be private.
-	UniqueKernelStack stack;
-};
-
-struct Executor;
+struct UserContext;
+struct AbiParameters;
+struct FiberContext;
 
 // Restores the current executor from its saved image.
 // This is functions does the heavy lifting during task switch.
@@ -368,9 +80,6 @@ struct Executor;
 [[noreturn]] void restoreExecutor(Executor *executor);
 
 struct Executor {
-	friend void saveExecutor(Executor *executor, FaultImageAccessor accessor);
-	friend void saveExecutor(Executor *executor, IrqImageAccessor accessor);
-	friend void saveExecutor(Executor *executor, SyscallImageAccessor accessor);
 	friend void workOnExecutor(Executor *executor);
 	friend void restoreExecutor(Executor *executor);
 
@@ -499,18 +208,11 @@ private:
 	common::x86::Tss64 *_tss;
 };
 
-void saveExecutor(Executor *executor, FaultImageAccessor accessor);
-void saveExecutor(Executor *executor, IrqImageAccessor accessor);
-void saveExecutor(Executor *executor, SyscallImageAccessor accessor);
-
 // Copies the current state into the executor and calls the supplied function.
 extern "C" void doForkExecutor(Executor *executor, void (*functor)(void *), void *context);
 
 void workOnExecutor(Executor *executor);
 
-void scrubStack(FaultImageAccessor accessor, Continuation cont);
-void scrubStack(IrqImageAccessor accessor, Continuation cont);
-void scrubStack(SyscallImageAccessor accessor, Continuation cont);
 void scrubStack(Executor *executor, Continuation cont);
 
 struct CpuFeatures {
@@ -536,6 +238,330 @@ extern CpuFeatures globalCpuFeatures;
 }
 
 initgraph::Stage *getCpuFeaturesKnownStage();
+
+template <typename Frame>
+struct BaseImageAccessor {
+
+	void *frameBase() const noexcept { return _pointer + sizeof(Frame); }
+
+	void scrubStack(Continuation cont) const noexcept {
+		scrubStackFrom(reinterpret_cast<uintptr_t>(frameBase()), cont);
+	}
+
+protected:
+	void _saveTo(Executor &executor, Word csSource, Word ssSource) const noexcept {
+		auto dest = executor.general();
+		auto src = _frame();
+
+		// For SyscallImageAccessor:
+		// Note that rbx, rcx and r11 are used internally by the syscall mechanism.
+		dest->rax = src->rax;
+		dest->rdx = src->rdx;
+		dest->rdi = src->rdi;
+		dest->rsi = src->rsi;
+		dest->rbp = src->rbp;
+
+		dest->r8 = src->r8;
+		dest->r9 = src->r9;
+		dest->r10 = src->r10;
+		dest->r12 = src->r12;
+		dest->r13 = src->r13;
+		dest->r14 = src->r14;
+		dest->r15 = src->r15;
+
+		// For SyscallImageAccessor:
+		// Note that we do not save cs and ss on syscall.
+		// We just assume that these registers have their usual values.
+		dest->rip = src->rip;
+		dest->cs = csSource;
+		dest->rflags = src->rflags;
+		dest->rsp = src->rsp;
+		dest->ss = ssSource;
+		dest->clientFs = common::x86::rdmsr(common::x86::kMsrIndexFsBase);
+		dest->clientGs = common::x86::rdmsr(common::x86::kMsrIndexKernelGsBase);
+
+		if(getGlobalCpuFeatures()->haveXsave){
+			common::x86::xsave(reinterpret_cast<uint8_t*>(executor._fxState()), ~0);
+		}else{
+			asm volatile ("fxsaveq %0" : : "m" (*executor._fxState()));
+		}
+	}
+
+	Frame *_frame() const noexcept {
+		return reinterpret_cast<Frame *>(_pointer);
+	}
+
+	char *_pointer;
+};
+
+template <typename Frame>
+struct CommonImageAccessor: BaseImageAccessor<Frame> {
+
+	using BaseImageAccessor<Frame>::frameBase;
+
+	Word *ip() const noexcept { return &_frame()->rip; }
+	Word *cs() const noexcept { return &_frame()->cs; }
+	Word *rflags() const noexcept { return &_frame()->rflags; }
+
+	void saveTo(Executor &executor) const noexcept {
+		_saveTo(executor, _frame()->cs, _frame()->ss);
+	}
+
+protected:
+	using BaseImageAccessor<Frame>::_frame;
+	using BaseImageAccessor<Frame>::_saveTo;
+};
+
+// note: this struct is accessed from assembly.
+// do not change the field offsets!
+struct FaultFrame {
+	Word rax;
+	Word rbx;
+	Word rcx;
+	Word rdx;
+	Word rdi;
+	Word rsi;
+	Word r8;
+	Word r9;
+	Word r10;
+	Word r11;
+	Word r12;
+	Word r13;
+	Word r14;
+	Word r15;
+	Word rbp;
+	Word code;
+
+	// the following fields are pushed by interrupt
+	Word rip;
+	Word cs;
+	Word rflags;
+	Word rsp;
+	Word ss;
+};
+
+struct FaultImageAccessor: CommonImageAccessor<FaultFrame> {
+
+	Word *ss() const noexcept { return &_frame()->ss; }
+	Word *sp() const noexcept { return &_frame()->rsp; }
+	Word *code() const noexcept { return &_frame()->code; }
+
+	bool inKernelDomain() const noexcept {
+		switch(*cs()) {
+			case kSelSystemIrqCode:
+			case kSelSystemIdleCode:
+			case kSelSystemFiberCode:
+			case kSelExecutorFaultCode:
+			case kSelExecutorSyscallCode:
+				return true;
+			case kSelClientUserCompat:
+			case kSelClientUserCode:
+				return false;
+			default:
+				assert(!"Unexpected domain");
+				return false;
+		}
+	}
+
+	bool allowUserPages();
+
+private:
+	using CommonImageAccessor<FaultFrame>::_frame;
+};
+
+struct IrqFrame {
+	Word rax;
+	Word rbx;
+	Word rcx;
+	Word rdx;
+	Word rdi;
+	Word rsi;
+	Word r8;
+	Word r9;
+	Word r10;
+	Word r11;
+	Word r12;
+	Word r13;
+	Word r14;
+	Word r15;
+	Word rbp;
+
+	// the following fields are pushed by interrupt
+	Word rip;
+	Word cs;
+	Word rflags;
+	Word rsp;
+	Word ss;
+
+	Word *expectedGs;
+};
+
+struct IrqImageAccessor: CommonImageAccessor<IrqFrame> {
+
+	using CommonImageAccessor<IrqFrame>::cs;
+
+	bool inPreemptibleDomain() const noexcept {
+		assert(*cs() == kSelSystemIdleCode
+				|| *cs() == kSelSystemFiberCode
+				|| *cs() == kSelExecutorFaultCode
+				|| *cs() == kSelExecutorSyscallCode
+				|| *cs() == kSelClientUserCompat
+				|| *cs() == kSelClientUserCode);
+		return true;
+	}
+
+	bool inThreadDomain() const noexcept {
+		assert(inPreemptibleDomain());
+		switch(*cs()) {
+		case kSelExecutorFaultCode:
+		case kSelExecutorSyscallCode:
+		case kSelClientUserCompat:
+		case kSelClientUserCode:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	bool inManipulableDomain() const noexcept {
+		assert(inThreadDomain());
+		return *cs() == kSelClientUserCompat ||
+				*cs() == kSelClientUserCode;
+	}
+
+	bool inFiberDomain() const noexcept {
+		assert(inPreemptibleDomain());
+		return *cs() == kSelSystemFiberCode;
+	}
+
+	bool inIdleDomain() const noexcept {
+		assert(inPreemptibleDomain());
+		return *cs() == kSelSystemIdleCode;
+	}
+};
+
+struct NmiFrame {
+	Word rax;
+	Word rbx;
+	Word rcx;
+	Word rdx;
+	Word rdi;
+	Word rsi;
+	Word r8;
+	Word r9;
+	Word r10;
+	Word r11;
+	Word r12;
+	Word r13;
+	Word r14;
+	Word r15;
+	Word rbp;
+
+	// the following fields are pushed by interrupt
+	Word rip;
+	Word cs;
+	Word rflags;
+	Word rsp;
+	Word ss;
+
+	void *expectedGs;
+};
+
+struct NmiImageAccessor: CommonImageAccessor<NmiFrame> {
+
+	void **expectedGs() const noexcept {
+		return &_frame()->expectedGs;
+	}
+
+	void saveTo(Executor &executor) const noexcept = delete;
+
+private:
+	using CommonImageAccessor<NmiFrame>::_frame;
+};
+
+// this struct is accessed from assembly.
+// do not randomly change its contents.
+struct SyscallFrame {
+	Word rdi;
+	Word rsi;
+	Word rdx;
+	Word rax;
+	Word r8;
+	Word r9;
+	Word r10;
+	Word r12;
+	Word r13;
+	Word r14;
+	Word r15;
+	Word rbp;
+	Word rsp;
+	Word rip;
+	Word rflags;
+};
+
+struct SyscallImageAccessor: BaseImageAccessor<SyscallFrame> {
+
+	Word *number() const noexcept { return &_frame()->rdi; }
+	Word *in0() const noexcept { return &_frame()->rsi; }
+	Word *in1() const noexcept { return &_frame()->rdx; }
+	Word *in2() const noexcept { return &_frame()->rax; }
+	Word *in3() const noexcept { return &_frame()->r8; }
+	Word *in4() const noexcept { return &_frame()->r9; }
+	Word *in5() const noexcept { return &_frame()->r10; }
+	Word *in6() const noexcept { return &_frame()->r12; }
+	Word *in7() const noexcept { return &_frame()->r13; }
+	Word *in8() const noexcept { return &_frame()->r14; }
+
+	Word *error() const noexcept { return &_frame()->rdi; }
+	Word *out0() const noexcept { return &_frame()->rsi; }
+	Word *out1() const noexcept { return &_frame()->rdx; }
+
+	void saveTo(Executor &executor) const noexcept {
+		_saveTo(executor, kSelClientUserCode, kSelClientUserData);
+	}
+
+private:
+	using BaseImageAccessor<SyscallFrame>::_frame;
+};
+
+// CpuData is some high-level struct that inherits from PlatformCpuData.
+struct CpuData;
+
+struct AbiParameters {
+	uintptr_t ip;
+	uintptr_t sp;
+	uintptr_t argument;
+};
+
+struct UserContext {
+	static void deactivate();
+
+	UserContext();
+
+	UserContext(const UserContext &other) = delete;
+
+	UserContext &operator= (const UserContext &other) = delete;
+
+	void enableIoPort(uintptr_t port);
+
+	// Migrates this UserContext to a different CPU.
+	void migrate(CpuData *cpu_data);
+
+	// TODO: This should be private.
+	UniqueKernelStack kernelStack;
+	common::x86::Tss64 tss;
+};
+
+struct FiberContext {
+	FiberContext(UniqueKernelStack stack);
+
+	FiberContext(const FiberContext &other) = delete;
+
+	FiberContext &operator= (const FiberContext &other) = delete;
+
+	// TODO: This should be private.
+	UniqueKernelStack stack;
+};
 
 // switches the active executor.
 // does NOT restore the executor's state.

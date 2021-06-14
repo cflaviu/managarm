@@ -49,54 +49,71 @@ struct Continuation {
 	void *sp;
 };
 
-struct FaultImageAccessor;
+struct BaseImageAccessor {
 
-struct SyscallImageAccessor {
-	friend void saveExecutor(Executor *executor, SyscallImageAccessor accessor);
+	void *frameBase() const noexcept { return _pointer + sizeof(Frame); }
 
-	Word *number() { return &_frame()->x[0]; }
-	Word *in0() { return &_frame()->x[1]; }
-	Word *in1() { return &_frame()->x[2]; }
-	Word *in2() { return &_frame()->x[3]; }
-	Word *in3() { return &_frame()->x[4]; }
-	Word *in4() { return &_frame()->x[5]; }
-	Word *in5() { return &_frame()->x[6]; }
-	Word *in6() { return &_frame()->x[7]; }
-	Word *in7() { return &_frame()->x[8]; }
-	Word *in8() { return &_frame()->x[9]; }
+	void scrubStack(Continuation cont) const noexcept {
+		scrubStackFrom(reinterpret_cast<uintptr_t>(frameBase()), cont);
+	}
 
-	Word *error() { return &_frame()->x[0]; }
-	Word *out0() { return &_frame()->x[1]; }
-	Word *out1() { return &_frame()->x[2]; }
+	void saveTo(Executor *executor);
 
-	void *frameBase() { return _pointer + sizeof(Frame); }
+protected:
+	BaseImageAccessor() = default;
 
-private:
-	friend struct FaultImageAccessor;
-
-	SyscallImageAccessor(char *ptr)
+	BaseImageAccessor(char *ptr)
 	: _pointer{ptr} { }
 
-	Frame *_frame() {
+	Frame *_frame() const noexcept {
 		return reinterpret_cast<Frame *>(_pointer);
 	}
 
 	char *_pointer;
 };
 
-struct FaultImageAccessor {
-	friend void saveExecutor(Executor *executor, FaultImageAccessor accessor);
+struct FaultImageAccessor;
 
-	Word *ip() { return &_frame()->elr; }
-	Word *sp() { return &_frame()->sp; }
+struct SyscallImageAccessor: BaseImageAccessor {
+	friend void saveExecutor(Executor *executor, SyscallImageAccessor accessor);
+
+	Word *number() const noexcept { return &_frame()->x[0]; }
+	Word *in0() const noexcept { return &_frame()->x[1]; }
+	Word *in1() const noexcept { return &_frame()->x[2]; }
+	Word *in2() const noexcept { return &_frame()->x[3]; }
+	Word *in3() const noexcept { return &_frame()->x[4]; }
+	Word *in4() const noexcept { return &_frame()->x[5]; }
+	Word *in5() const noexcept { return &_frame()->x[6]; }
+	Word *in6() const noexcept { return &_frame()->x[7]; }
+	Word *in7() const noexcept { return &_frame()->x[8]; }
+	Word *in8() const noexcept { return &_frame()->x[9]; }
+
+	Word *error() const noexcept { return &_frame()->x[0]; }
+	Word *out0() const noexcept { return &_frame()->x[1]; }
+	Word *out1() const noexcept { return &_frame()->x[2]; }
+
+private:
+	friend struct FaultImageAccessor;
+
+	using BaseImageAccessor::BaseImageAccessor;
+};
+
+struct CommonImageAccessor: BaseImageAccessor {
+	Word *ip() noexcept { return &_frame()->elr; }
 
 	// TODO: this should have a different name
-	Word *rflags() { return &_frame()->spsr; }
-	Word *code() { return &_frame()->esr ; }
+	Word *rflags() noexcept { return &_frame()->spsr; }
+};
 
-	Word *faultAddr() { return &_frame()->far; }
 
-	bool inKernelDomain() {
+struct FaultImageAccessor: CommonImageAccessor {
+	friend void saveExecutor(Executor *executor, FaultImageAccessor accessor);
+
+	Word *sp() const noexcept { return &_frame()->sp; }
+	Word *code() const noexcept { return &_frame()->esr ; }
+	Word *faultAddr() const noexcept { return &_frame()->far; }
+
+	bool inKernelDomain() const noexcept {
 		return (_frame()->spsr & 0b1111) != 0b0000;
 	}
 
@@ -105,63 +122,48 @@ struct FaultImageAccessor {
 	operator SyscallImageAccessor () {
 		return SyscallImageAccessor{_pointer};
 	}
-
-	void *frameBase() { return _pointer + sizeof(Frame); }
-
-private:
-	Frame *_frame() {
-		return reinterpret_cast<Frame *>(_pointer);
-	}
-
-	char *_pointer;
 };
 
 struct IrqImageAccessor {
 	friend void saveExecutor(Executor *executor, IrqImageAccessor accessor);
 
-	Word *ip() { return &_frame()->elr; }
-
-	// TODO: These are only exposed for debugging.
-	// TODO: this should have a different name
-	Word *rflags() { return &_frame()->spsr; }
-
-	bool inPreemptibleDomain() {
-		return _frame()->domain == Domain::fault
-			|| _frame()->domain == Domain::fiber
-			|| _frame()->domain == Domain::idle
-			|| _frame()->domain == Domain::user;
-		return true;
+	bool inPreemptibleDomain() const noexcept {
+		switch(_frame()->domain) {
+			case Domain::fault:
+			case Domain::fiber:
+			case Domain::idle:
+			case Domain::user:
+				return true;
+			default:
+				return false;
+		}
 	}
 
-	bool inThreadDomain() {
+	bool inThreadDomain() const noexcept {
 		assert(inPreemptibleDomain());
-		return _frame()->domain == Domain::fault
-			|| _frame()->domain == Domain::user;
+		switch(_frame()->domain) {
+			case Domain::fault:
+			case Domain::user:
+				return true;
+			default:
+				return false;
+		}
 	}
 
-	bool inManipulableDomain() {
+	bool inManipulableDomain() const noexcept {
 		assert(inThreadDomain());
 		return _frame()->domain == Domain::user;
 	}
 
-	bool inFiberDomain() {
+	bool inFiberDomain() const noexcept {
 		assert(inPreemptibleDomain());
 		return _frame()->domain == Domain::fiber;
 	}
 
-	bool inIdleDomain() {
+	bool inIdleDomain() const noexcept {
 		assert(inPreemptibleDomain());
 		return _frame()->domain == Domain::idle;
 	}
-
-	void *frameBase() { return _pointer + sizeof(Frame); }
-
-private:
-	Frame *_frame() {
-		return reinterpret_cast<Frame *>(_pointer);
-	}
-
-	char *_pointer;
 };
 
 // CpuData is some high-level struct that inherits from PlatformCpuData.
@@ -208,9 +210,6 @@ struct Executor;
 [[noreturn]] void restoreExecutor(Executor *executor);
 
 struct Executor {
-	friend void saveExecutor(Executor *executor, FaultImageAccessor accessor);
-	friend void saveExecutor(Executor *executor, IrqImageAccessor accessor);
-	friend void saveExecutor(Executor *executor, SyscallImageAccessor accessor);
 	friend void workOnExecutor(Executor *executor);
 	friend void restoreExecutor(Executor *executor);
 
@@ -253,10 +252,6 @@ private:
 	char *_pointer;
 	void *_exceptionStack;
 };
-
-void saveExecutor(Executor *executor, FaultImageAccessor accessor);
-void saveExecutor(Executor *executor, IrqImageAccessor accessor);
-void saveExecutor(Executor *executor, SyscallImageAccessor accessor);
 
 // Copies the current state into the executor and calls the supplied function.
 extern "C" void doForkExecutor(Executor *executor, void (*functor)(void *), void *context);
